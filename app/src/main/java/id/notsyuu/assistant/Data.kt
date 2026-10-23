@@ -18,7 +18,19 @@ class Data(val context: Context) {
         save(key, (list(key) + obj).takeLast(if (key == "history") 150 else 500)); id
     }
     fun log(text: String) { add("history", JSONObject().put("text", text)) }
-    fun allowed(pkg: String) = pkg != context.packageName && prefs.getStringSet("allowed", emptySet())!!.contains(pkg)
+    fun allowed(pkg: String) = canRead(pkg)
+    fun canRead(pkg:String) = pkg != context.packageName && permissionSet("readAllowed").contains(pkg)
+    fun canWrite(pkg:String) = pkg != context.packageName && permissionSet("writeAllowed").contains(pkg)
+    fun permissionSet(key:String):Set<String> = prefs.getStringSet(key, if(key in listOf("readAllowed","writeAllowed")) prefs.getStringSet("allowed",emptySet()) else emptySet())!!.toSet()
+    fun setPermission(scope:String,pkg:String,value:Boolean) {
+        val key=when(scope) { "write"->"writeAllowed";"notice"->"noticeAllowed";else->"readAllowed" }
+        val set=permissionSet(key).toMutableSet();if(value)set.add(pkg) else set.remove(pkg)
+        prefs.edit().putStringSet(key,set).apply()
+    }
+    fun setAllPermissions(scope:String,packages:Set<String>,value:Boolean) {
+        val key=when(scope) { "write"->"writeAllowed";else->"readAllowed" }
+        prefs.edit().putStringSet(key,if(value)packages-context.packageName else emptySet()).apply()
+    }
     fun profile() = prefs.getString("profile", "") ?: ""
     fun brief(): String {
         val notes = list("notes").filter { !it.optBoolean("done") }.joinToString("\n") { "• ${it.optString("text")}" }

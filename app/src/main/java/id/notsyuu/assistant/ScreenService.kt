@@ -15,7 +15,7 @@ class ScreenService : AccessibilityService() {
     override fun onDestroy() { current = null; super.onDestroy() }
     override fun onInterrupt() {}
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-    private fun root(): AccessibilityNodeInfo? = windows.mapNotNull { it.root }.firstOrNull { Data(this).allowed(it.packageName?.toString() ?: "") }
+    private fun root(write:Boolean=false): AccessibilityNodeInfo? = windows.mapNotNull { it.root }.firstOrNull { val pkg=it.packageName?.toString() ?: ""; if(write) Data(this).canWrite(pkg) else Data(this).canRead(pkg) }
     fun snapshot(): String {
         val r = root() ?: return "Tidak ada layar aplikasi yang diizinkan. Tambahkan aplikasi pada menu Akses, lalu tampilkan aplikasinya."
         val result = StringBuilder("Aplikasi: ${r.packageName}\n")
@@ -29,7 +29,7 @@ class ScreenService : AccessibilityService() {
         visit(r, 0); return result.toString()
     }
     fun act(kind: String, value: String, expectedPackage: String): Boolean {
-        val r = root() ?: return false
+        val r = root(write=true) ?: return false
         if (r.packageName?.toString() != expectedPackage) return false
         fun find(n: AccessibilityNodeInfo): AccessibilityNodeInfo? {
             if (n.isPassword) return null

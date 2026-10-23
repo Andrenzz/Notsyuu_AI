@@ -1,0 +1,4 @@
+Gemma is provided under and subject to the Gemma Terms of Use found at ai.google.dev/gemma/terms
+
+Bundled model: gemma3-1b-it-int4.litertlm, provided by the user; model weights are unmodified.
+Use and redistribution of the bundled model are subject to the accompanying GEMMA-TERMS.txt, including the restrictions in Section 3.2 and GEMMA-PROHIBITED-USE-POLICY.txt. These restrictions govern use and distribution of the bundled Gemma model through Andrea AI.

@@ -7,7 +7,7 @@ import org.json.JSONObject
 import java.util.Calendar
 
 object Scheduler {
-    fun channel(c: Context) { c.getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("reminders", "Pengingat Notsyuu", NotificationManager.IMPORTANCE_HIGH)) }
+    fun channel(c: Context) { c.getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel("reminders", "Pengingat Andrea AI", NotificationManager.IMPORTANCE_HIGH)) }
     fun schedule(c: Context, item: JSONObject) {
         val pi = PendingIntent.getBroadcast(c, item.getString("id").hashCode(), Intent(c, AlarmReceiver::class.java).putExtra("id", item.getString("id")), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         // Inexact alarms avoid requiring restricted exact-alarm permission.

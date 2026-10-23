@@ -33,20 +33,25 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private var active = true
     private var busy = false
     private var importing = false
+    private var queuedPrompt:String?=null
+    private var showBubbleAfterNotification=false
     private val stopReceiver=object:BroadcastReceiver() { override fun onReceive(c:Context?,i:Intent?) { command(JSONObject().put("op","stop")) } }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState); data = Data(this)
         val stopFilter=IntentFilter("id.notsyuu.assistant.STOP")
         androidx.core.content.ContextCompat.registerReceiver(this,stopReceiver,stopFilter,androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
-        window.statusBarColor = Color.rgb(11,17,32); window.navigationBarColor = Color.rgb(11,17,32)
+        window.statusBarColor = Color.rgb(239,241,250); window.navigationBarColor = Color.rgb(239,241,250)
+        window.decorView.systemUiVisibility=android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         web = WebView(this)
         val container=android.widget.FrameLayout(this)
-        container.setBackgroundColor(Color.rgb(11,17,32))
+        container.background=android.graphics.drawable.GradientDrawable().apply { setColor(Color.rgb(239,241,250));cornerRadius=if(this@MainActivity is PopupActivity) 26*resources.displayMetrics.density else 0f }
+        container.clipToOutline=true
+        web.setBackgroundColor(Color.TRANSPARENT)
         container.addView(web,android.widget.FrameLayout.LayoutParams(-1,-1))
         container.setOnApplyWindowInsetsListener { view,insets ->
             val bars=insets.getInsets(android.view.WindowInsets.Type.systemBars())
             val ime=insets.getInsets(android.view.WindowInsets.Type.ime())
-            view.setPadding(bars.left,bars.top,bars.right,maxOf(bars.bottom,ime.bottom))
+            if(this is PopupActivity) view.setPadding(0,0,0,0) else view.setPadding(bars.left,bars.top,bars.right,maxOf(bars.bottom,ime.bottom))
             android.view.WindowInsets.CONSUMED
         }
         setContentView(container)
@@ -66,7 +71,7 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 if(request?.hasGesture()==true && uri?.scheme=="https") try { startActivity(Intent(Intent.ACTION_VIEW,uri)) } catch (_: Exception) { toast("Browser tidak tersedia.") }
                 return true
             }
-            override fun onPageFinished(view: WebView?, url: String?) { ready = true; if(this@MainActivity is PopupActivity) emit("popup",true); refresh(); handleLaunch(intent) }
+            override fun onPageFinished(view: WebView?, url: String?) { ready = true; if(this@MainActivity is PopupActivity) emit("popup",true); refresh(); prepareBundledModel(); handleLaunch(intent) }
         }
         web.loadUrl("file:///android_asset/index.html")
         tts = TextToSpeech(this,this); Scheduler.channel(this)
@@ -97,12 +102,14 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun state(): JSONObject {
         val nm = getSystemService(NotificationManager::class.java)
         return JSONObject().put("notes",JSONArray(data.list("notes"))).put("alarms",JSONArray(data.list("alarms"))).put("history",JSONArray(data.list("history").takeLast(80))).put("chat",JSONArray(data.list("chat").takeLast(40)))
-            .put("model",File(filesDir,"model.litertlm").exists()).put("modelName",data.prefs.getString("modelName","Belum ada model"))
+            .put("model",BundledModel.ready(this)).put("modelName",data.prefs.getString("modelName","Gemma 3 1B • sudah termasuk APK"))
+            .put("modelPreparing",importing || BundledModel.preparing).put("modelProgress",BundledModel.progress)
+            .put("reduceMotion",!android.animation.ValueAnimator.areAnimatorsEnabled())
             .put("overlay",Settings.canDrawOverlays(this)).put("accessibility",ScreenService.current != null)
             .put("notifications",nm.areNotificationsEnabled()).put("notice",Settings.Secure.getString(contentResolver,"enabled_notification_listeners")?.contains(packageName) == true)
             .put("speak",data.prefs.getBoolean("speak",false)).put("profile",data.profile()).put("busy",busy)
             .put("internet",data.prefs.getBoolean("internet",true))
-            .put("apps",JSONArray(apps().map { JSONObject().put("name",it.first).put("package",it.second).put("allowed",data.allowed(it.second)).put("notice",data.prefs.getStringSet("noticeAllowed",emptySet())!!.contains(it.second)) }))
+            .put("apps",JSONArray(apps().filter { it.second!=packageName }.map { JSONObject().put("name",it.first).put("package",it.second).put("read",data.canRead(it.second)).put("write",data.canWrite(it.second)).put("notice",data.prefs.getStringSet("noticeAllowed",emptySet())!!.contains(it.second)) }))
             .put("folder",data.prefs.getString("folder","")!!.isNotBlank())
     }
     private fun refresh() { emit("state",state()) }
@@ -116,20 +123,27 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
             "full" -> { startActivity(Intent(this,MainActivity::class.java)); if(this is PopupActivity) finish() }
             "internet" -> { data.prefs.edit().putBoolean("internet",o.getBoolean("value")).apply(); refresh() }
             "voice" -> listen()
-            "stop" -> { LocalBrain.stop(); busy=false; pending=null; steps.clear(); recognizer?.cancel(); tts?.stop(); emit("dismissConfirm",true); emit("busy",false); data.log("Tugas dihentikan pengguna"); refresh() }
-            "bubble" -> if (Settings.canDrawOverlays(this)) startForegroundService(Intent(this,BubbleService::class.java)) else startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,Uri.parse("package:$packageName")))
-            "hideBubble" -> stopService(Intent(this,BubbleService::class.java))
+            "stop" -> { LocalBrain.stop(); queuedPrompt=null;busy=false; pending=null; steps.clear(); recognizer?.cancel(); tts?.stop(); emit("dismissConfirm",true); emit("busy",false); data.log("Tugas dihentikan pengguna"); refresh() }
+            "bubble" -> requestBubble()
+            "hideBubble" -> startForegroundService(Intent(this,BubbleService::class.java).setAction("hide"))
             "access" -> startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
             "noticeAccess" -> startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
             "notificationAccess" -> if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS),31)
             "dnd" -> startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))
             "model" -> if (busy || importing) toast("Tunggu tugas atau impor selesai dahulu.") else startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE),101)
+            "prepareModel" -> prepareBundledModel()
+            "modelLicense" -> showModelLicense()
             "unload" -> { LocalBrain.unload(); toast("Model dilepas dari RAM setelah proses aktif selesai.") }
             "folder" -> startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),102)
             "profile" -> { data.prefs.edit().putString("profile",o.optString("text").take(4000)).apply(); toast("Profil disimpan di HP."); refresh() }
             "speak" -> { data.prefs.edit().putBoolean("speak",o.getBoolean("value")).apply(); refresh() }
             "voices" -> chooseVoice()
-            "allow" -> { val key = if(o.optBoolean("notice")) "noticeAllowed" else "allowed"; val set = data.prefs.getStringSet(key,emptySet())!!.toMutableSet(); if(o.getBoolean("value")) set.add(o.getString("package")) else set.remove(o.getString("package")); data.prefs.edit().putStringSet(key,set).apply(); refresh() }
+            "allow" -> { val scope=o.optString("scope","read");val pkg=o.getString("package");data.setPermission(scope,pkg,o.getBoolean("value"));if(scope=="read" && !o.getBoolean("value") && pkg==screenPackage)screenText="";refresh() }
+            "allowAll" -> {
+                val scope=o.optString("scope","read");val value=o.getBoolean("value")
+                val applyPermissions={ data.setAllPermissions(scope,apps().map { it.second }.toSet(),value);if(scope=="read" && !value)screenText="";refresh() }
+                if(value) AlertDialog.Builder(this).setTitle(if(scope=="write") "Izinkan tindakan di semua aplikasi?" else "Izinkan baca layar semua aplikasi?").setMessage(if(scope=="write") "Andrea AI dapat menjalankan ketuk, gulir, dan isian pada aplikasi yang terbuka. Setiap tindakan tetap memerlukan konfirmasi. Ini tidak memberikan akses file atau hak sistem tanpa batas." else "Andrea AI dapat membaca teks Aksesibilitas pada aplikasi yang terbuka saat kamu meminta konteks layar. Kolom sandi dan layar terlindungi tetap dilewati.").setNegativeButton("Batal") { _,_ -> refresh() }.setPositiveButton("Izinkan semua") { _,_ -> applyPermissions() }.show() else applyPermissions()
+            }
             "addNote" -> { val t=o.optString("text").trim(); if(t.isNotBlank()) data.add("notes",JSONObject().put("text",t).put("done",false)); refresh() }
             "toggleNote" -> { data.save("notes",data.list("notes").map { if(it.optString("id")==o.optString("id")) it.put("done",!it.optBoolean("done")) else it }); refresh() }
             "deleteNote" -> AlertDialog.Builder(this).setTitle("Hapus catatan ini?").setNegativeButton("Batal",null).setPositiveButton("Hapus") { _,_ -> data.save("notes",data.list("notes").filter { it.optString("id")!=o.optString("id") }); refresh() }.show()
@@ -143,7 +157,8 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
     private fun submit(raw: String) {
         val text = raw.trim().take(4000); if(text.isBlank()) return
-        if(busy || importing) { toast("Tunggu proses selesai, atau tekan Stop."); return }
+        if(importing || BundledModel.preparing) { queuedPrompt=text;emit("status","Model bawaan sedang disiapkan. Pertanyaanmu akan diproses sesudahnya.");return }
+        if(busy) { toast("Tunggu proses selesai, atau tekan Stop."); return }
         data.add("chat",JSONObject().put("role","user").put("text",text)); emit("user",text)
         val lower = text.lowercase(Locale.ROOT)
         when {
@@ -191,9 +206,9 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
     private fun propose(action: JSONObject) {
         if(action.optString("action")!="open" && action.optString("package").isBlank()) {
-            if(screenPackage.isNotBlank() && data.allowed(screenPackage)) action.put("package",screenPackage)
+            if(screenPackage.isNotBlank() && data.canWrite(screenPackage)) action.put("package",screenPackage)
             else {
-                val available=apps().filter { data.allowed(it.second) }
+                val available=apps().filter { data.canWrite(it.second) }
                 if(available.isEmpty()) { steps.clear(); reply("Izinkan aplikasi tujuan di menu Akses dahulu."); return }
                 AlertDialog.Builder(this).setTitle("Pilih aplikasi tujuan tindakan").setItems(available.map { it.first }.toTypedArray()) { _,i -> action.put("package",available[i].second); propose(action) }.setNegativeButton("Batal") { _,_ -> steps.clear() }.show(); return
             }
@@ -213,7 +228,7 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
             return
         }
         val expected=p.optString("package")
-        if(!data.allowed(expected)) { steps.clear(); reply("Izin aplikasi tujuan telah dicabut."); return }
+        if(!data.canWrite(expected)) { steps.clear(); reply("Izin menjalankan tindakan di aplikasi tujuan telah dicabut."); return }
         val targetIntent=packageManager.getLaunchIntentForPackage(expected)
         if(targetIntent==null) { steps.clear(); reply("Aplikasi tujuan tidak tersedia."); return }
         startActivity(targetIntent)
@@ -221,7 +236,7 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
             if(ticket!=LocalBrain.version()) return@postDelayed
             val ok=ScreenService.current?.act(p.optString("action"),p.optString("value"),expected) ?: false
             data.log("${p.optString("action")}: ${if(ok) "berhasil" else "gagal atau layar tidak diizinkan"}")
-            // Returning to Notsyuu is an explicit continuation of the user's confirmed action.
+            // Returning to Andrea AI is an explicit continuation of the user's confirmed action.
             startActivity(Intent(this,this::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
             reply(if(ok) "Tindakan dijalankan. Periksa hasil pada aplikasi tujuan." else "Tindakan gagal. Pastikan aplikasi tujuan diizinkan, terlihat, dan kolom isian sudah dipilih. Layar terlindungi tidak bisa diakses.")
             if(ok && steps.isNotEmpty()) main.postDelayed({ if(ticket==LocalBrain.version()) propose(steps.removeFirst()) },400) else if(!ok) steps.clear()
@@ -257,7 +272,7 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private fun chooseVoice() {
         val voices=tts?.voices?.filter { it.locale.language=="id" && !it.isNetworkConnectionRequired }?.sortedBy { it.name } ?: emptyList()
         if(voices.isEmpty()) { AlertDialog.Builder(this).setTitle("Suara offline belum tersedia").setMessage("Pasang data suara Bahasa Indonesia melalui pengaturan mesin text-to-speech. Label gender tidak disediakan semua mesin; pilih suara pria dengan mendengarkan contoh.").setPositiveButton("Pengaturan") { _,_ -> startActivity(Intent("com.android.settings.TTS_SETTINGS")) }.setNegativeButton("Tutup",null).show(); return }
-        AlertDialog.Builder(this).setTitle("Pilih & dengarkan suara offline").setItems(voices.map { it.name }.toTypedArray()) { _,i -> tts?.voice=voices[i]; data.prefs.edit().putString("voice",voices[i].name).putBoolean("speak",true).apply(); speak("Halo, saya Notsyuu. Siap membantu kegiatanmu hari ini."); refresh() }.show()
+        AlertDialog.Builder(this).setTitle("Pilih & dengarkan suara offline").setItems(voices.map { it.name }.toTypedArray()) { _,i -> tts?.voice=voices[i]; data.prefs.edit().putString("voice",voices[i].name).putBoolean("speak",true).apply(); speak("Halo, saya Andrea AI. Siap membantu kegiatanmu hari ini."); refresh() }.show()
     }
     private fun listen() {
         if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED) { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO),30); return }
@@ -282,7 +297,7 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 if(ticket!=LocalBrain.version()) return@execute
                 if(results.isEmpty()) { reply("Tidak ada hasil internet yang dapat digunakan. Coba pertanyaan yang lebih spesifik atau matikan mode internet untuk bertanya kepada model lokal."); return@execute }
                 val sources="\n\nSumber internet:\n"+results.joinToString("\n\n") { "${it.title}\n${it.url}" }
-                if(!File(filesDir,"model.litertlm").exists()) {
+                if(!BundledModel.ready(this)) {
                     reply("Hasil pencarian internet (model lokal belum dipasang, sehingga belum dirangkum):\n\n"+results.joinToString("\n\n") { "${it.title}\n${it.description}\n${it.url}" });return@execute
                 }
                 val evidence=results.joinToString("\n") { "SUMBER: ${it.title}\n${it.description}" }.take(3200)
@@ -290,7 +305,17 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
             } catch(e:Exception) { if(ticket==LocalBrain.version()) reply("Pencarian internet gagal: ${e.message?.take(180)}. Periksa koneksi, coba lagi, atau matikan internet untuk memakai model lokal.") }
         }
     }
-    override fun onRequestPermissionsResult(requestCode:Int,permissions:Array<out String>,grantResults:IntArray) { super.onRequestPermissionsResult(requestCode,permissions,grantResults); if(requestCode==30 && grantResults.firstOrNull()==PackageManager.PERMISSION_GRANTED) listen(); refresh() }
+    override fun onRequestPermissionsResult(requestCode:Int,permissions:Array<out String>,grantResults:IntArray) {
+        super.onRequestPermissionsResult(requestCode,permissions,grantResults)
+        if(requestCode==30 && grantResults.firstOrNull()==PackageManager.PERMISSION_GRANTED) listen()
+        if(requestCode==31 && showBubbleAfterNotification) { showBubbleAfterNotification=false;if(grantResults.firstOrNull()==PackageManager.PERMISSION_GRANTED)startForegroundService(Intent(this,BubbleService::class.java).setAction("show")) else toast("Aktifkan notifikasi agar bubble dapat dimunculkan kembali dari notifikasi.") }
+        refresh()
+    }
+    private fun requestBubble() {
+        if(!Settings.canDrawOverlays(this)) { startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,Uri.parse("package:$packageName")));return }
+        if(Build.VERSION.SDK_INT>=33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED) { showBubbleAfterNotification=true;requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS),31);return }
+        startForegroundService(Intent(this,BubbleService::class.java).setAction("show"))
+    }
     @Deprecated("Activity result API") override fun onActivityResult(requestCode:Int,resultCode:Int,result:Intent?) {
         super.onActivityResult(requestCode,resultCode,result); val uri=result?.data ?: return; if(resultCode!=RESULT_OK) return
         if(requestCode==102) { try { contentResolver.takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION); data.prefs.edit().putString("folder",uri.toString()).apply(); refresh() } catch(e:Exception) { reply("Folder tidak dapat diizinkan: ${e.message}") } }
@@ -325,6 +350,23 @@ open class MainActivity : Activity(), TextToSpeech.OnInitListener {
                 visit(DocumentsContract.getTreeDocumentId(tree),"",0)
                 if(ticket==LocalBrain.version()) reply(hits.joinToString("\n").ifBlank { "Nama file tidak ditemukan dalam batas pencarian 2.000 entri." })
             } catch(e:Exception) { if(ticket==LocalBrain.version()) reply("Pencarian gagal: ${e.message}") }
+        }
+    }
+    private fun prepareBundledModel() {
+        if(importing)return
+        if(BundledModel.ready(this)) { refresh();return }
+        importing=true;emit("status","Menyiapkan Gemma bawaan…")
+        worker.execute {
+            try {
+                BundledModel.ensure(this) { percent -> emit("modelProgress",percent) }
+                main.post { importing=false;if(active) { refresh();emit("status","Gemma bawaan siap dipakai.");queuedPrompt?.let { val text=it;queuedPrompt=null;submit(text) } } }
+            } catch(e:Exception) { main.post { importing=false;queuedPrompt=null;if(active) { refresh();reply("Model bawaan belum siap: ${e.message}. Tekan Siapkan ulang model di Akses.") } } }
+        }
+    }
+    private fun showModelLicense() {
+        worker.execute {
+            val license=runCatching { assets.open("licenses/GEMMA-TERMS.txt").bufferedReader().use { it.readText() } }.getOrDefault("Gemma Terms of Use: https://ai.google.dev/gemma/terms")
+            main.post { if(active) { val text=android.widget.TextView(this).apply { this.text=license;setTextColor(Color.rgb(59,57,77));setPadding(24,20,24,20);textSize=12f };val scroll=android.widget.ScrollView(this).apply { addView(text) };AlertDialog.Builder(this).setTitle("Lisensi Gemma bawaan").setView(scroll).setPositiveButton("Tutup",null).show() } }
         }
     }
     private fun readCalendar() {

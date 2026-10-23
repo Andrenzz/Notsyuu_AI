@@ -1,0 +1,10 @@
+{
+  "name": "Gemma 3 1B IT int4",
+  "asset": "app/src/main/assets/models/gemma3-1b-it-int4.litertlm",
+  "bytes": 584417280,
+  "sha256": "1325ae366d31950f137c9c357b9fa89448b176d76998180c08ceaca78bba98be",
+  "modified": false,
+  "terms": "https://ai.google.dev/gemma/terms",
+  "notice": "app/src/main/assets/licenses/Notice.txt",
+  "distribution": "Bundled in the APK release. Model weights are excluded from Git source history."
+}

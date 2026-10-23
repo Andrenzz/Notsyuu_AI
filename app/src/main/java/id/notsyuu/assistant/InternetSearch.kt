@@ -13,7 +13,7 @@ object InternetSearch {
         val url="https://www.bing.com/search?format=rss&q="+URLEncoder.encode(query.take(350),"UTF-8")
         val connection=URL(url).openConnection() as HttpURLConnection
         connection.connectTimeout=10000; connection.readTimeout=10000; connection.instanceFollowRedirects=false
-        connection.setRequestProperty("User-Agent","Notsyuu/0.1 (personal Android assistant)")
+        connection.setRequestProperty("User-Agent","Andrea AI/0.1 (personal Android assistant)")
         try {
             require(connection.responseCode==200) { "Penyedia pencarian tidak merespons. Coba lagi nanti." }
             val bytes=connection.inputStream.use { it.readBytesLimited(500000) }
